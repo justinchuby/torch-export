@@ -30,7 +30,6 @@ def torch_onnx_export_adaptor(
     autograd_inlining: Optional[bool] = True,
     **_,
 ) -> None:
-    # Test: create an exported program first
     if args and isinstance(args[-1], dict):
         kwargs = args[-1]
         args = args[:-1]
