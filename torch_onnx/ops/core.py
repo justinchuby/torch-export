@@ -47,8 +47,8 @@ BOOL = ir.DataType.BOOL
 COMPLEX64 = ir.DataType.COMPLEX64
 COMPLEX128 = ir.DataType.COMPLEX128
 DOUBLE = ir.DataType.DOUBLE
-FLOAT = ir.DataType.FLOAT
-FLOAT16 = ir.DataType.FLOAT16
+FLOAT = FLOAT
+FLOAT16 = FLOAT16
 INT8 = ir.DataType.INT8
 INT16 = ir.DataType.INT16
 INT32 = ir.DataType.INT32
@@ -77,8 +77,8 @@ def constant(op: OpBuilder, value, dtype: torch.dtype | ir.DataType | None = Non
 def is_int_value(value: ir.Value) -> bool:
     return value.dtype in {
         ir.DataType.BFLOAT16,
-        ir.DataType.FLOAT16,
-        ir.DataType.FLOAT,
+        FLOAT16,
+        FLOAT,
         ir.DataType.DOUBLE,
         ir.DataType.INT8,
         ir.DataType.INT16,
@@ -601,7 +601,7 @@ def aten_arange(
         # because the input dtype may be e.g. bfloat16 / int8 etc.
         # which Range does not support. The output type is ensured because the output
         # is casted to the specified dtype.
-        end = op.Cast(end, to=ir.DataType.FLOAT)
+        end = op.Cast(end, to=FLOAT)
         zero = op.Constant(value_float=0.0)
         one = op.Constant(value_float=1.0)
         result = op.Cast(op.Range(zero, end, one), to=dtype)
@@ -631,8 +631,8 @@ def aten_arange_start(
         # because the input dtype may be e.g. bfloat16 / int8 etc.
         # which Range does not support. The output type is ensured because the output
         # is casted to the specified dtype.
-        end = op.Cast(end, to=ir.DataType.FLOAT)
-        start = op.Cast(start, to=ir.DataType.FLOAT)
+        end = op.Cast(end, to=FLOAT)
+        start = op.Cast(start, to=FLOAT)
         one = op.Constant(value_float=1.0)
         result = op.Cast(op.Range(start, end, one), to=dtype)
 
@@ -641,14 +641,15 @@ def aten_arange_start(
 
 @torch_op("aten::arange.start_step", private=True)
 def _adjust_args_for_arange_int_dtype(
+    op,
     start: TRealUnlessFloat16OrInt8,
     end: TRealUnlessFloat16OrInt8,
     step: TRealUnlessFloat16OrInt8,
 ) -> Tuple[FLOAT, FLOAT, FLOAT]:
-    zero = op.Cast(0.0, to=ir.DataType.FLOAT)
-    start = op.Cast(start, to=ir.DataType.FLOAT)
-    end = op.Cast(end, to=ir.DataType.FLOAT)
-    step = op.Cast(step, to=ir.DataType.FLOAT)
+    zero = op.Cast(0.0, to=FLOAT)
+    start = op.Cast(start, to=FLOAT)
+    end = op.Cast(end, to=FLOAT)
+    step = op.Cast(step, to=FLOAT)
 
     start = op.Where(op.Less(start, zero), op.Ceil(start), start)
     start = op.Where(op.Less(step, zero), op.Floor(start), start)
@@ -675,9 +676,9 @@ def aten_arange_start_step(
         # PyTorch arange op handles these integral types differently from INT64,
         # so we have to adjust these arguments accordingly.
         # https://github.com/pytorch/pytorch/blob/121cfb60c0817816fcbe2190303b7f6d05c77cf3/torch/_refs/__init__.py#L4794
-        start, end, step = _adjust_args_for_arange_int_dtype(start, end, step)
+        start, end, step = _adjust_args_for_arange_int_dtype(op, start, end, step)
         result = op.Cast(op.Range(start, end, step), to=dtype)
-    elif dtype == INT64.dtype:
+    elif dtype == INT64:
         end = op.Cast(end, to=dtype)
         start = op.Cast(start, to=dtype)
         step = op.Cast(step, to=dtype)
@@ -687,9 +688,9 @@ def aten_arange_start_step(
         # because the input dtype may be e.g. bfloat16,
         # which Range does not support. The output type is ensured because the output
         # is casted to the specified dtype.
-        end = op.Cast(end, to=ir.DataType.FLOAT)
-        start = op.Cast(start, to=ir.DataType.FLOAT)
-        step = op.Cast(step, to=ir.DataType.FLOAT)
+        end = op.Cast(end, to=FLOAT)
+        start = op.Cast(start, to=FLOAT)
+        step = op.Cast(step, to=FLOAT)
         result = op.Cast(op.Range(start, end, step), to=dtype)
 
     return result
@@ -826,7 +827,7 @@ def aten_as_strided(
 
 
 @torch_op("aten::as_strided", private=True)
-def _aten_as_strided_onnx(
+def _aten_as_strided_onnx(op,
     self: TTensor, size: INT64, stride: INT64, storage_offset: int = 0, rank: int = 0
 ) -> TTensor:
     # e.g. when size=[2,3,4], stride=[2,1,3], indices=[0]
@@ -869,7 +870,7 @@ def _aten_as_strided_onnx(
         else:
             # shape = [dim_size, 1, 1, ...], the count of 1 euqal to i
             ones = op.ConcatFromSequence(one_seq, axis=0)
-            shape = op.Concat(op.Cast(size_dim_j, to=ir.DataType.FLOAT), ones, axis=0)
+            shape = op.Concat(op.Cast(size_dim_j, to=FLOAT), ones, axis=0)
             shape = op.Cast(shape, to=INT64)
 
         add_value = op.Reshape(add_value, shape)
@@ -936,11 +937,13 @@ def aten_atan2(op: OpBuilder, self: TFloat, other: TFloat) -> TFloat:
     """atan2(Tensor self, Tensor other) -> Tensor"""
 
     # self is y, and other is x on coordinate
+    pi = constant(op, math.pi, self.dtype)
+    zero = constant(op, 0.0, self.dtype)
     slope = op.Div(self, other)
     atan = op.Atan(slope)
 
-    second_third_quadrant = op.Where(self > 0.0, atan + _MATH_PI, atan - _MATH_PI)
-    result = op.Where(other < 0.0, second_third_quadrant, atan)
+    second_third_quadrant = op.Where(op.Greater(self, zero), op.Add(atan, pi), op.Sub(atan, pi))
+    result = op.Where(op.Less(other, zero), second_third_quadrant, atan)
 
     return result
 
@@ -1185,7 +1188,7 @@ def aten_bernoulli_p(op: OpBuilder, self: TTensor, p: float) -> TTensor:
     Ignore `generator` due to the limit on ONNX expressiveness.
     """
     # NOTE: We will lose some precision when input is float64 but that's considered insignificant
-    self_float = op.Cast(self, to=ir.DataType.FLOAT)
+    self_float = op.Cast(self, to=FLOAT)
     rands = op.RandomUniformLike(
         self_float,
         high=1.0,
@@ -1268,20 +1271,20 @@ def aten_bitwise_left_shift_int16(op: OpBuilder, self: INT16, other: INT16) -> I
 def aten_bitwise_left_shift_int32(op: OpBuilder, self: INT32, other: INT32) -> INT32:
     """bitwise_left_shift.Tensor(Tensor self, Tensor other) -> Tensor"""
     # assert other >= 0
-    self = op.Cast(self, to=UINT32.dtype)
-    other = op.Cast(other, to=UINT32.dtype)
+    self = op.Cast(self, to=UINT32)
+    other = op.Cast(other, to=UINT32)
 
     result = op.BitShift(self, other, direction="LEFT")
 
-    return op.Cast(result, to=INT32.dtype)
+    return op.Cast(result, to=INT32)
 
 
 @torch_op("aten::bitwise_left_shift")
 def aten_bitwise_left_shift_int64(op: OpBuilder, self: INT64, other: INT64) -> INT64:
     """bitwise_left_shift.Tensor(Tensor self, Tensor other) -> Tensor"""
     # assert other >= 0
-    self = op.Cast(self, to=UINT64.dtype)
-    other = op.Cast(other, to=UINT64.dtype)
+    self = op.Cast(self, to=UINT64)
+    other = op.Cast(other, to=UINT64)
 
     result = op.BitShift(self, other, direction="LEFT")
 
@@ -1355,13 +1358,13 @@ def aten_bitwise_right_shift_int16(op: OpBuilder, self: INT16, other: INT16) -> 
 def aten_bitwise_right_shift_int32(op: OpBuilder, self: INT32, other: INT32) -> INT32:
     """bitwise_right_shift.Tensor(Tensor self, Tensor other) -> Tensor"""
     negative = op.Less(self, 0)
-    self = op.Cast(self, to=UINT32.dtype)
-    other = op.Cast(other, to=UINT32.dtype)
+    self = op.Cast(self, to=UINT32)
+    other = op.Cast(other, to=UINT32)
 
     # Simulate arithmetic shift using logical shift
     # Clear the lower bits of an all one mask to create the mask to simulate the sign bit shifting
     mask = op.BitShift(
-        op.Cast(op.Constant(value_int=0xFFFFFFFF), to=UINT32.dtype),
+        op.Cast(op.Constant(value_int=0xFFFFFFFF), to=UINT32),
         other,
         direction="RIGHT",
     )
@@ -1373,8 +1376,8 @@ def aten_bitwise_right_shift_int32(op: OpBuilder, self: INT32, other: INT32) -> 
     # Choose the shifted value based on the sign bit
     return op.Where(
         negative,
-        op.Cast(negative_shifted, to=INT32.dtype),
-        op.Cast(shifted, to=INT32.dtype),
+        op.Cast(negative_shifted, to=INT32),
+        op.Cast(shifted, to=INT32),
     )
 
 
@@ -1382,14 +1385,14 @@ def aten_bitwise_right_shift_int32(op: OpBuilder, self: INT32, other: INT32) -> 
 def aten_bitwise_right_shift_int64(op: OpBuilder, self: INT64, other: INT64) -> INT64:
     """bitwise_right_shift.Tensor(Tensor self, Tensor other) -> Tensor"""
     negative = op.Less(self, 0)
-    self = op.Cast(self, to=UINT64.dtype)
-    other = op.Cast(other, to=UINT64.dtype)
+    self = op.Cast(self, to=UINT64)
+    other = op.Cast(other, to=UINT64)
 
     # Simulate arithmetic shift using logical shift
     # Clear the lower bits of an all one mask to create the mask to simulate the sign bit shifting
     mask = op.BitShift(
         # 0xFFFFFFFFFFFFFFFF
-        op.Cast(op.Constant(value_int=-1), to=UINT64.dtype),
+        op.Cast(op.Constant(value_int=-1), to=UINT64),
         other,
         direction="RIGHT",
     )
@@ -1511,15 +1514,13 @@ def aten_cat_complex(
     return aten_cat(op, tensors, dim=dim)
 
 
-@torch_op("aten::cat")
+@torch_op("aten::cat", trace_only=True)
 def aten_cat(op: OpBuilder, tensors: Sequence[TTensor], dim: int = 0) -> TTensor:
     """cat(Tensor[] tensors, int dim=0) -> Tensor"""
 
     # NOTE: Having empty tensors when concatenating along non-zero dimension
     # is not supported.
-    # TODO(justinchuby): Filter these tensors out with Sequence ops before
-    # calling ConcatFromSequence.
-    return op.ConcatFromSequence(tensors, axis=dim)
+    return op.Concat(*tensors, axis=dim)
 
 
 def aten_ccol_indices(op: OpBuilder, self: TensorType) -> TensorType:
@@ -1554,7 +1555,7 @@ def aten_ceil(op: OpBuilder, self: TFloat) -> TFloat:
 
 
 @torch_op("math::ceil")
-def python_math_ceil(self: TFloat) -> TInt:
+def python_math_ceil(op, self: TFloat) -> TInt:
     """ceil(Tensor self) -> Tensor"""
     ceil = op.Ceil(self)
     return op.Cast(ceil, to=INT64)
@@ -1743,7 +1744,7 @@ def aten_combinations(
 
 
 @torch_op("aten::complex", private=True)
-def _aten_complex(real: TFloat, imag: TFloat) -> TFloat:
+def _aten_complex(op, real: TFloat, imag: TFloat) -> TFloat:
     """Non-broadcasting complex constructor."""
 
     return op.Concat(
@@ -1760,7 +1761,7 @@ def aten_complex(op: OpBuilder, real: TFloat, imag: TFloat) -> TFloat:
     real = op.Expand(real, broadcasted_shape)
     imag = op.Expand(imag, broadcasted_shape)
 
-    return _aten_complex(real, imag)
+    return _aten_complex(op, real, imag)
 
 
 @torch_op("aten::concat")
@@ -2909,7 +2910,7 @@ def aten_div_mode_int(
     assert rounding_mode in {"trunc", "floor"}
 
     quotient = op.Div(
-        op.Cast(self, to=ir.DataType.FLOAT), op.Cast(other, to=ir.DataType.FLOAT)
+        op.Cast(self, to=FLOAT), op.Cast(other, to=FLOAT)
     )
 
     if rounding_mode == "trunc":
@@ -3049,7 +3050,7 @@ def _aten_embedding_bag_onnx(
         offsets = op.Concat(offsets, indices_size, axis=0)  # Replace end with number
 
     # The element in sequence must be FLOAT32 dtype due to ORT bug
-    new_weight = op.Cast(new_weight, to=ir.DataType.FLOAT)
+    new_weight = op.Cast(new_weight, to=FLOAT)
     # FIXME: https://github.com/microsoft/onnxruntime/issues/16846
     result = op.SequenceEmpty()
 
@@ -3190,7 +3191,7 @@ def _aten_embedding_bag_1d_padding_idx_onnx(
     indices_weight = op.Mul(indices_weight, op.Unsqueeze(per_sample_weights, axes=1))
 
     # The element in sequence must be FLOAT32 dtype due to ORT bug
-    indices_weight = op.Cast(indices_weight, to=ir.DataType.FLOAT)
+    indices_weight = op.Cast(indices_weight, to=FLOAT)
     # FIXME: https://github.com/microsoft/onnxruntime/issues/16846
     result = op.SequenceEmpty()
 
@@ -4376,7 +4377,7 @@ def aten_index_put_bool(
 
     index = op.SequenceAt(indices, 0)  # assume indices only have 1 element
     # FIXME: ORT ArgMax fails on INT64 input even though ONNX allows it
-    index_int = op.Cast(index, to=INT32.dtype)
+    index_int = op.Cast(index, to=INT32)
     # if all False, return self
     if op.ReduceSum(index_int) == 0:
         result = self
@@ -4676,7 +4677,7 @@ def aten_isinf(op: OpBuilder, self: TFloatOrBFloat16) -> BOOL:
     """isinf(Tensor self) -> Tensor"""
 
     # Added Cast inside the function so it can support all real dtypes naturally
-    self = op.Cast(self, to=ir.DataType.FLOAT)
+    self = op.Cast(self, to=FLOAT)
     return op.IsInf(self)
 
 
@@ -4692,7 +4693,7 @@ def aten_isneginf(op: OpBuilder, self: TFloatOrBFloat16) -> BOOL:
     """isneginf(Tensor self) -> Tensor"""
 
     # Added Cast inside the function so it can support all real dtypes naturally
-    self = op.Cast(self, to=ir.DataType.FLOAT)
+    self = op.Cast(self, to=FLOAT)
     return op.And(op.Less(self, 0), op.IsInf(self))
 
 
@@ -4701,7 +4702,7 @@ def aten_isposinf(op: OpBuilder, self: TFloatOrBFloat16) -> BOOL:
     """isposinf(Tensor self) -> Tensor"""
 
     # Added Cast inside the function so it can support all real dtypes naturally
-    self = op.Cast(self, to=ir.DataType.FLOAT)
+    self = op.Cast(self, to=FLOAT)
     return op.And(op.Greater(self, 0), op.IsInf(self))
 
 
@@ -5836,7 +5837,7 @@ def aten_multinomial(
         unsqueezed_input = self
     # ONNX multinomial expects log probability
     log_input = op.Log(unsqueezed_input)
-    result = op.Multinomial(log_input, dtype=INT64.dtype, sample_size=num_samples)
+    result = op.Multinomial(log_input, dtype=INT64, sample_size=num_samples)
     if Rank(self) == 1:
         result = op.Squeeze(result)
     return result
@@ -6077,7 +6078,7 @@ def _aten_native_batch_norm_training_onnx(
     # Compute mean and rstd
     # Mean, var, and rstd computation and results are expected to be
     # in higher precision when inputs are float16.
-    upcast_input = op.Cast(input, to=ir.DataType.FLOAT)
+    upcast_input = op.Cast(input, to=FLOAT)
     mean = op.ReduceMean(upcast_input, axes)
     input_sub_mean = op.Sub(upcast_input, mean)
     sqr = op.Mul(input_sub_mean, input_sub_mean)
@@ -6089,7 +6090,7 @@ def _aten_native_batch_norm_training_onnx(
     # Compute the running var the PyTorch way
     # https://github.com/pytorch/pytorch/blob/5cc511f72fe073bbd8c10d796d72dce67f5cd5c4/torch/_decomp/decompositions.py#L1646
 
-    n = op.Cast(op.Size(input) / op.Shape(input)[1], to=ir.DataType.FLOAT)
+    n = op.Cast(op.Size(input) / op.Shape(input)[1], to=FLOAT)
     unbiased_var = var * (n / (n - 1.0))
 
     # NOTE: momentum in ONNX is 1.0-momentum in PyTorch
@@ -6131,8 +6132,8 @@ def _aten_native_batch_norm_inference_onnx(
     # We use CUDA's output here
     invstd = op.Div(1.0, op.Sqrt(running_var + eps))
     # https://github.com/pytorch/pytorch/blob/a44f8894fa6d973693aab44a3dda079a168b05c1/torch/_decomp/decompositions.py#L1475
-    running_mean_fp32 = op.Cast(running_mean, to=ir.DataType.FLOAT)
-    invstd = op.Cast(invstd, to=ir.DataType.FLOAT)
+    running_mean_fp32 = op.Cast(running_mean, to=FLOAT)
+    invstd = op.Cast(invstd, to=FLOAT)
     return norm, running_mean_fp32, invstd, running_mean, running_var
 
 
@@ -7136,7 +7137,7 @@ def aten_rand_like_dtype(op: OpBuilder, self: TensorType, dtype: int) -> TensorT
 
 @torch_op("aten::randint")
 def aten_randint(
-    op: OpBuilder, high: INT64, size: INT64, dtype: int = INT64.dtype
+    op: OpBuilder, high: INT64, size: INT64, dtype: int = INT64
 ) -> TensorType:
     """randint(SymInt high, SymInt[] size, *, ScalarType? dtype=long, Layout? layout=None, Device? device=None, bool? pin_memory=None) -> Tensor"""
 
@@ -7151,15 +7152,15 @@ def aten_randint(
 
 @torch_op("aten::randint.low")
 def aten_randint_low(
-    op, low: INT64, high: INT64, size: INT64, dtype: int = INT64.dtype
+    op, low: INT64, high: INT64, size: INT64, dtype: int = INT64
 ) -> TensorType:
     """randint.low(SymInt low, SymInt high, SymInt[] size, *, ScalarType? dtype=long, Layout? layout=None, Device? device=None, bool? pin_memory=None) -> Tensor"""
 
     shaper = op.ConstantOfShape(size)
     rand = op.RandomUniformLike(shaper)
     # Translate to [low, high] first
-    high = op.Cast(high, to=ir.DataType.FLOAT)
-    low = op.Cast(low, to=ir.DataType.FLOAT)
+    high = op.Cast(high, to=FLOAT)
+    low = op.Cast(low, to=FLOAT)
     rand_translated = op.Add(op.Mul(rand, op.Sub(high, low)), low)
     # Round to ints
     rand_int = op.Floor(rand_translated)
@@ -7170,7 +7171,7 @@ def aten_randint_low(
 def aten_randint_like(op: OpBuilder, self: TensorType, high: INT64) -> IntType:
     """randint_like(Tensor self, SymInt high, *, ScalarType? dtype=None, Layout? layout=None, Device? device=None, bool? pin_memory=None, MemoryFormat? memory_format=None) -> Tensor"""
 
-    self_float = op.Cast(self, to=ir.DataType.FLOAT)
+    self_float = op.Cast(self, to=FLOAT)
     rand = op.RandomUniformLike(self_float)
     # Scale to [0, high] first
     rand_scaled = op.Mul(rand, op.CastLike(high, rand))
@@ -7185,7 +7186,7 @@ def aten_randint_like_dtype(
 ) -> TensorType:
     """randint_like(Tensor self, SymInt high, *, ScalarType? dtype=None, Layout? layout=None, Device? device=None, bool? pin_memory=None, MemoryFormat? memory_format=None) -> Tensor"""
 
-    self_float = op.Cast(self, to=ir.DataType.FLOAT)
+    self_float = op.Cast(self, to=FLOAT)
     rand = op.RandomUniformLike(self_float)
     # Scale to [0, high] first
     rand_scaled = op.Mul(rand, op.CastLike(high, rand))
@@ -7203,11 +7204,11 @@ def aten_randint_like_low_dtype(
     This is the TorchLib overload for aten::randint_like.low_dtype when dtype is None.
     """
 
-    self_float = op.Cast(self, to=ir.DataType.FLOAT)
+    self_float = op.Cast(self, to=FLOAT)
     rand = op.RandomUniformLike(self_float)
     # Translate to [low, high] first
-    high = op.Cast(high, to=ir.DataType.FLOAT)
-    low = op.Cast(low, to=ir.DataType.FLOAT)
+    high = op.Cast(high, to=FLOAT)
+    low = op.Cast(low, to=FLOAT)
     rand_translated = op.Add(op.Mul(rand, op.Sub(high, low)), low)
     # Round to ints
     rand_int = op.Floor(rand_translated)
@@ -7220,11 +7221,11 @@ def aten_randint_like_low_dtype_dtype(
 ) -> TensorType:
     """randint_like.low_dtype(Tensor self, SymInt low, SymInt high, *, ScalarType? dtype=None, Layout? layout=None, Device? device=None, bool? pin_memory=None, MemoryFormat? memory_format=None) -> Tensor"""
 
-    self_float = op.Cast(self, to=ir.DataType.FLOAT)
+    self_float = op.Cast(self, to=FLOAT)
     rand = op.RandomUniformLike(self_float)
     # Translate to [low, high] first
-    high = op.Cast(high, to=ir.DataType.FLOAT)
-    low = op.Cast(low, to=ir.DataType.FLOAT)
+    high = op.Cast(high, to=FLOAT)
+    low = op.Cast(low, to=FLOAT)
     rand_translated = op.Add(op.Mul(rand, op.Sub(high, low)), low)
     # Round to ints
     rand_int = op.Floor(rand_translated)
@@ -7645,7 +7646,7 @@ def aten_scalar_tensor_complex(
     if dtype == COMPLEX128.dtype:
         result = op.Cast(s, to=DOUBLE.dtype)
     elif dtype == COMPLEX64.dtype:
-        result = op.Cast(s, to=ir.DataType.FLOAT)
+        result = op.Cast(s, to=FLOAT)
     else:
         # NOTE: No-op for non-complex dtype
         # It's potentially a bug if it comes here with no-op.
@@ -8807,7 +8808,7 @@ def _aten_unfold_onnx(
         )  # ends is [0+size, step+size, step*2+size, step*3+size, ...]
         slice_result = op.Slice(self, starts, ends, dims)
         # sequence only support float32
-        slice_result_float32 = op.Cast(slice_result, to=ir.DataType.FLOAT)
+        slice_result_float32 = op.Cast(slice_result, to=FLOAT)
         seq_result = op.SequenceInsert(seq_result, slice_result_float32)
         i = i + 1
         cond = i < target_end
