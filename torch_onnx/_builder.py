@@ -5,11 +5,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence, TypeGuard
 
 from onnxscript import ir
 from onnxscript.ir import _convenience as ir_convenience
-
+from torch_onnx import _torch_tensor
+import torch
 
 class Tape(Iterable[ir.Node]):
     """A tape for recording nodes that are created."""
@@ -61,6 +62,35 @@ class Tape(Iterable[ir.Node]):
         return node.outputs
 
 
+def py_value_to_constant(op: OpBuilder, value, dtype: ir.DataType | None = None):
+    if dtype is None:
+        if isinstance(value, int):
+            return op.Constant(value_int=value)
+        if isinstance(value, float):
+            return op.Constant(value_float=value)
+        if isinstance(value, Sequence):
+            # Only support 1D
+            if any(isinstance(elem, float) for elem in value):
+                return op.Constant(value_floats=value)
+            if any(isinstance(elem, float) for elem in value):
+                return op.Constant(value_floats=value)
+    else:
+        assert dtype is not None
+        torch_dtype = _torch_tensor.onnx_dtype_to_torch_dtype(dtype)
+        value = _torch_tensor.TorchTensor(torch.tensor(value, torch_dtype))
+    assert isinstance(value, torch.Tensor)
+    return op.Constant(value=_torch_tensor.TorchTensor(value))
+
+
+def _is_dynamic(value) -> TypeGuard[ir.Value]:
+    return isinstance(value, ir.Value) and value.const_value is None
+
+
+def _get_constant(value) -> torch.Tensor:
+    if isinstance(value, ir.Value):
+        return torch.from_dlpack(value)
+    return torch.tensor(value)
+
 class OpBuilder:
     def __init__(self, graph: ir.Graph, domain: str, opset_version: int):
         self.graph = graph
@@ -81,6 +111,23 @@ class OpBuilder:
     def _handle_call(
         self, op_type: str, inputs: Sequence[ir.Value], kwargs: dict[str, Any]
     ):
+        if op_type == "CastLike":
+            value, target = inputs
+            if not _is_dynamic(value) and target.dtype is not None:
+                return py_value_to_constant(self, _get_constant(value), dtype=target.dtype)
+        elif op_type == "Cast":
+            (value,) = inputs
+            dtype = kwargs["to"]
+            if not _is_dynamic(value):
+                return py_value_to_constant(self, _get_constant(value), dtype=dtype)
+
+        inputs = []
+        for input in inputs:
+            if not isinstance(input, ir.Value):
+                # Deduplication happens in _handle_constant
+                inputs.append(py_value_to_constant(self, input))
+            else:
+                inputs.append(input)
         if op_type == "Constant":
             return self._handle_constant(op_type, inputs, kwargs)
         return self._make_node(op_type, inputs, kwargs)

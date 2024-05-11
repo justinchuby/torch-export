@@ -25,14 +25,21 @@ _TORCH_DTYPE_TO_ONNX: dict[torch.dtype, ir.DataType] = {
     torch.uint8: ir.DataType.UINT8,
 }
 
+_ONNX_DTYPE_TO_TORCH_DTYPE: dict[ir.DataType, torch.dtype] = {
+    value: key for (key, value) in _TORCH_DTYPE_TO_ONNX.items()
+}
 
-def _torch_dtype_to_onnx_dtype(dtype: torch.dtype) -> ir.DataType:
+def torch_dtype_to_onnx_dtype(dtype: torch.dtype) -> ir.DataType:
     return _TORCH_DTYPE_TO_ONNX[dtype]
+
+
+def onnx_dtype_to_torch_dtype(dtype: ir.DataType) -> torch.dtype:
+    return _ONNX_DTYPE_TO_TORCH_DTYPE[dtype]
 
 class TorchTensor(ir.Tensor):
     def __init__(self, tensor: torch.Tensor):
         # Pass the tensor as the raw data to ir.Tensor's constructor
-        super().__init__(tensor, dtype=_torch_dtype_to_onnx_dtype(tensor.dtype))
+        super().__init__(tensor, dtype=torch_dtype_to_onnx_dtype(tensor.dtype))
 
     def __array__(self, dtype: Any = None) -> np.ndarray:
         # numpy() calls __array__ in ir.Tensor
