@@ -35,6 +35,7 @@ from torch_onnx import (
     _onnx_program,
     _reporting,
     _ir_passes,
+    _torchscript_converter,
 )
 
 
@@ -830,21 +831,23 @@ def export(
     profiler = _maybe_start_profiler(profile)
 
     # Step 0: Export the model with torch.export.export if the model is not already an ExportedProgram
-    if not isinstance(model, torch.export.ExportedProgram):
+    if isinstance(model, torch.export.ExportedProgram):
+        program = model
+    elif isinstance(model, (torch.jit.ScriptModule, torch.jit.ScriptFunction)):
+        model_repr = _take_first_line(repr(model))
+        print(
+            f"Obtain model graph for `{model_repr}` with `TorchScript to ExportedProgram converter` because model is jit'ed..."
+        )
         try:
-            model_repr = _take_first_line(repr(model))
+            program = _torchscript_converter.TS2EPConverter(
+                model, args, kwargs
+            ).convert()
             print(
-                f"Obtain model graph for `{model_repr}` with `torch.export.export`..."
-            )
-            program = torch.export.export(
-                model, args, kwargs=kwargs, dynamic_shapes=dynamic_shapes
-            )
-            print(
-                f"Obtain model graph for `{model_repr}` with `torch.export.export`... ✅"
+                f"Obtain model graph for `{model_repr}` with `TorchScript to ExportedProgram converter` because model is jit'ed... ✅"
             )
         except Exception as e:
             print(
-                f"Obtain model graph for `{model_repr}` with `torch.export.export`... ❌"
+                f"Obtain model graph for `{model_repr}` with `TorchScript to ExportedProgram converter` because model is jit'ed... ❌"
             )
             profile_result = _maybe_stop_profiler_and_get_result(profiler)
 
@@ -852,6 +855,7 @@ def export(
                 error_report_path = f"onnx_export_{timestamp}_pt_export.md"
                 _reporting.create_torch_export_error_report(
                     error_report_path,
+                    # TODO(justinchuby): Check if we need to format the previous exception separately
                     _format_exception(e),
                     profile_result=profile_result,
                 )
@@ -860,9 +864,7 @@ def export(
 
             raise errors.TorchExportError(
                 textwrap.dedent(f"""\
-                    Failed to export the model with torch.export. {_BLUE}This is step 1/2{_END} of exporting the model to ONNX. Next steps:
-                    - Modify the model code for `torch.export.export` to succeed. Refer to https://pytorch.org/docs/stable/generated/exportdb/index.html for more information.
-                    - Debug `torch.export.export` and summit a PR to PyTorch.
+                    Failed to export the model with TorchScript converter. {_BLUE}This is step 1/2{_END} of exporting the model to ONNX. Next steps:
                     - Create an issue in the PyTorch GitHub repository against the {_BLUE}*torch.export*{_END} component and attach the full error stack as well as reproduction scripts.
                     """)
                 + f"Error report has been saved to '{error_report_path}'."
@@ -870,7 +872,55 @@ def export(
                 else ""
             ) from e
     else:
-        program = model
+        model_repr = _take_first_line(repr(model))
+        print(f"Obtain model graph for `{model_repr}` with `torch.export.export`...")
+        try:
+            program = torch.export.export(
+                model, args, kwargs=kwargs, dynamic_shapes=dynamic_shapes
+            )
+            print(
+                f"Obtain model graph for `{model_repr}` with `torch.export.export`... ✅"
+            )
+        except Exception:
+            print(
+                f"Obtain model graph for `{model_repr}` with `torch.export.export` but failed. Falling back to use torch.jit.trace... ⚠️"
+            )
+            # If torch.export.export fails, fall back to torchscript and try again.
+            try:
+                jit_model = torch.jit.trace(
+                    model, example_inputs=args, check_trace=False, strict=False
+                )
+                program = _torchscript_converter.TS2EPConverter(
+                    jit_model, args, kwargs
+                ).convert()
+            except Exception as e:
+                print(
+                    f"Obtain model graph for `{model_repr}` with `TorchScript to ExportedProgram converter` fails as well... ❌"
+                )
+                profile_result = _maybe_stop_profiler_and_get_result(profiler)
+
+                if error_report:
+                    error_report_path = f"onnx_export_{timestamp}_pt_export.md"
+                    _reporting.create_torch_export_error_report(
+                        error_report_path,
+                        # TODO(justinchuby): Check if we need to format the previous exception separately
+                        _format_exception(e),
+                        profile_result=profile_result,
+                    )
+                else:
+                    error_report_path = None
+
+                raise errors.TorchExportError(
+                    textwrap.dedent(f"""\
+                        Failed to export the model with torch.export. {_BLUE}This is step 1/2{_END} of exporting the model to ONNX. Next steps:
+                        - Modify the model code for `torch.export.export` to succeed. Refer to https://pytorch.org/docs/stable/generated/exportdb/index.html for more information.
+                        - Debug `torch.export.export` and summit a PR to PyTorch.
+                        - Create an issue in the PyTorch GitHub repository against the {_BLUE}*torch.export*{_END} component and attach the full error stack as well as reproduction scripts.
+                        """)
+                    + f"Error report has been saved to '{error_report_path}'."
+                    if error_report
+                    else ""
+                ) from e
 
     # Step 1: Convert the exported program to an ONNX model
     try:
